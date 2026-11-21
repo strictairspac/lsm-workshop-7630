@@ -1,3 +1,6 @@
 ROLES=('admin','operator','viewer')
 STATUSES=('queued','running','passed','failed')
 OPERATIONS=('put','delete')
+RENAME_JOB_STATUSES=('draft','switching','switched','failed')
+RENAME_GROUP_STATUSES=('single','collision','resolved','stale')
+RENAME_DECISION_STATES=('active','invalidated')

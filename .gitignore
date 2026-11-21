@@ -28,6 +28,7 @@ out/
 .parcel-cache/
 coverage/
 venv/
+.pylibs/
 target/
 *.o
 *.obj

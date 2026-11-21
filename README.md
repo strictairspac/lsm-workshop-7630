@@ -12,6 +12,7 @@
 - 层级配置：memtable 不同键容量、SSTable 合并触发数、层级上限、最终完整合并开关。
 - 合并队列：创建试验时持久化输入及配置快照，Redis 分发，独立 worker 执行并记录状态。
 - 读放大证据：显示合并前后层级、读写放大、真实存活键、Oracle 摘要、刷盘/合并轨迹、JSON 导出。
+- 键名统一演练：在工坊选批次配置旧名→新名改名规则；多个活键归到同一新名时由值班员裁决保留哪个值，裁决期间的并发改值/删键按乐观版本号让先前选择失效并要求重判；切换在单事务内一次性完成，旧名立碑并建立到新名的别名，新旧两种叫法读到同一个值；中断后 worker 按 attempt 幂等恢复，同次重试只启用一版。
 - 管理员审计：记录写操作账号、路由与 HTTP 结果，包含权限拒绝。
 
 | 角色 | 页面与权限 | 典型动作 |
@@ -67,6 +68,18 @@ Seed另含“旧值复活回归集”和“全部删除边界集”；配置另�
 
 输出包括真实计算的层级表数/键范围/墓碑数、每步刷盘合并轨迹、输入键数、存活键、写出条目、读写放大、Oracle及实际键值、摘要。空输入和超限在提交时422，引用不存在404，重名409，排队/运行总数超过20时429；worker失败保存error和failed状态。
 
+## 遥测键统一改名演练（裁决台）
+
+“键名统一”页面把同一站点的多个历史叫法归并到规范新名，是独立于 LSM 演算的并发改名教学模型，状态全部保存在 MySQL：
+
+1. **配规则、选批次**：`POST /renames` 提交 `rules:[{old_key,new_key}]` 与可选 `entries` 初始批次。同一旧名只能出现一次；旧名=新名、以及 A→B 且 B→C 的链路改名在一次性切换模型中被 422 拒绝。规则按新名归并成裁决组，组内超过一个活键即 `collision` 撞名待裁决。
+2. **值班员裁决**：`POST /renames/{id}/decisions` 提交 `group_ref/winner_key/expected_version`。`expected_version` 必须等于当前 `state_version`，否则 409——这是乐观并发控制，防止拿着过期视图覆盖别人的裁决。
+3. **并发写入与失效**：裁决期间 `POST /renames/{id}/live-write` 模拟站点实时 put/delete，每次推高 `state_version`；若改值或删键命中某裁决组的赢家键，该裁决立即置 `invalidated`（页面显示 stale），先前选择失效，必须按最新值重判后才能切换。
+4. **一次性原子切换**：`POST /renames/{id}/switch` 前置校验（无失效裁决、无未裁决撞名组）后入 Redis 队列，worker 在**单个数据库事务**内完成：新名取裁决赢家值（单活键组取唯一活值，全墓碑组新名也为墓碑）、全部旧名立碑、写入旧名→新名别名。切换后 `GET /renames/{id}/keys/{name}` 用旧名或新名都解析到同一规范行、读到同一个值。
+5. **中断恢复与幂等**：每个切换带 `attempt_id`；已 `switched` 的演练再次执行直接幂等返回，同次重试只启用一版。worker 轮询到遗留在 `switching` 的演练会按原 attempt 重放；`failed` 状态允许修正冲突后用新 attempt 重新驱动。切换后演练封板，拒绝再写入或改判。
+
+错误码与全站一致：重名 409、规则/墓碑赢家 422、引用不存在 404、待切换超过 20 个 429、观察员写请求 403。种子数据含“北岭站点-遥测键统一演练”，预置 temperature（三活键）与 humidity（两活键）两个撞名组。
+
 ## 技术栈与代码组织
 
 | 服务 | 实现与作用 |
@@ -77,7 +90,7 @@ Seed另含“旧值复活回归集”和“全部删除边界集”；配置另�
 | db | MySQL8.0，持久化3个业务实体、用户与审计 |
 | redis | Redis7，异步队列与持久卷 |
 
-`backend/src/`分为config/models/schemas/services/controllers/routes/middlewares/utils/constants；`backend/scripts/seed_demo.py`种子与初始化；`backend/migrations/README.md`为schema v1说明。3实体dataset/config/trial各自贯穿model/schema/service/route、前端api/store/page。试验结果保存在Trial JSON字段中，详情页为独立业务页面。
+`backend/src/`分为config/models/schemas/services/controllers/routes/middlewares/utils/constants；`backend/scripts/seed_demo.py`种子与初始化；`backend/migrations/README.md`为schema v1/v2说明。dataset/config/trial与rename_job各自贯穿model/schema/service/route、前端api/store/page。试验结果保存在Trial JSON字段中，改名演练的活键/裁决/别名保存在rename_keys/rename_decisions/rename_aliases表，详情页为独立业务页面。确定性后端测试位于`tests/`（SQLite内存库+假Redis，无需Docker）：`python3 -I tests/test_rename_service.py`与`python3 -I tests/test_rename_api.py`。
 
 `frontend/src/`包含api/stores/types/components/common/hooks/pages/router/utils/constants，表格/状态/页头跨页共享，HTML转义与反馈工具复用。角色/任务状态/操作类型枚举在`backend/src/constants/enums.py`和`frontend/src/constants/enums.js`。模型默认任务状态使用后端枚举，前端状态组件使用前端枚举。
 
